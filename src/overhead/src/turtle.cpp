@@ -12,10 +12,18 @@ ros::Publisher motors_publisher_;
 ros::Publisher velocity_publisher_;
 geometry_msgs::Twist cmd;
 kobuki_msgs::MotorPower msg_motor;
+float ranges[1000];
 void forward(float dist);
 
 void processLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan){
-     forward(2.0);
+    length =  (int)(scan->angle_max - scan->angle_min) / scan->angle_increment;
+     if(running == 0){
+       for(int i = 0; i < length; i++){
+         ranges[i] = scan->ranges[i];
+         //printf("ranges %f\n", ranges[i]);
+       }
+     }
+     //path_planner();
 }
 
 int main(int argc, char **argv)
