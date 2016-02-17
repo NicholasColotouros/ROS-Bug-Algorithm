@@ -13,9 +13,9 @@
 
 // Enums -- In part 1, SLINE just moves the robot forward.
 enum PlanningPhase { SLINE, WALL };
-char* phaseString[] = { "SLINE", "WALL" };
+char* phaseString[] = { "SLINE", "WALL" }; // TODO: remove once debugging is complete
 enum Direction { LEFT, CENTER, RIGHT, NONE };
-char* DirectionString[] = {"LEFT", "CENTER", "RIGHT", "NONE" };
+char* DirectionString[] = {"LEFT", "CENTER", "RIGHT", "NONE" }; // TODO: remove once debugging is complete
 
 ///////////////////////////////////
 ///////// STATE VARIABLES /////////
@@ -53,8 +53,8 @@ const float SAFE_DISTANCE = 0.75;
 ///////////////////////////////////
 /////// METHOD DECLARATIONS ///////
 ///////////////////////////////////
-void processLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan);
-void planPath();
+void ProcessLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan);
+void PlanPath();
 void WallPhase();
 void SlinePhase();
 
@@ -77,7 +77,7 @@ int main(int argc, char **argv)
   FollowWallSide = NONE;
 
   // All systems ready. BEGIN.
-  ros::Subscriber sub = n.subscribe<sensor_msgs::LaserScan>("/scan", 1000, processLaserScan);
+  ros::Subscriber sub = n.subscribe<sensor_msgs::LaserScan>("/scan", 1000, ProcessLaserScan);
   ros::spin();
 }
 
@@ -180,7 +180,7 @@ void MakeSmoothScan()
 
 // Scan the number of times specified by maxScanRep before moving. This is to prevent magical NaN misreads.
 // Then take the smallest non-NaN reading or use NaN if that was all that was read to plan the next move.
-void processLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan)
+void ProcessLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan)
 {
   // Length of scan array
   Num_Points =  (int)(scan->angle_max - scan->angle_min) / scan->angle_increment;
@@ -206,14 +206,14 @@ void processLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan)
   {
     // Move
     MakeSmoothScan();
-    planPath();
+    PlanPath();
 
     // Reset the scan counter
     CurrentScanRep = 0;
   }
 }
 
-void planPath()
+void PlanPath()
 {
   // TODO: implement for phase 2 of bug algo under WALL case:
   // IF robot is on SLINE
