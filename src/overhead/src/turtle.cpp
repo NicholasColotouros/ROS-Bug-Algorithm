@@ -1,17 +1,18 @@
 #include "ros/ros.h"
 #include "std_msgs/String.h"
 
+#include <tr1/tuple>
 #include <sstream>
 #include <sensor_msgs/LaserScan.h>
 #include <geometry_msgs/Twist.h>
 #include <kobuki_msgs/MotorPower.h>
 
 
-// Enums -- In part 1, SLINE just moves the robot forward
+// Enums -- In part 1, SLINE just moves the robot forward.
 enum PlanningPhase { SLINE, WALL };
 char* phaseString[] = { "SLINE", "WALL" };
-enum Direction { LEFT, CENTER, RIGHT };
-char* DirectionString[] = {"LEFT", "CENTER", "RIGHT"};
+enum Direction { LEFT, CENTER, RIGHT, NONE };
+char* DirectionString[] = {"LEFT", "CENTER", "RIGHT", "NONE" };
 int CurrentPhase;
 
 // Scan vars
@@ -23,6 +24,7 @@ float SafeDist = 0.75;
 int ScanRep;
 int PreviousWallDist;
 int PreviousWallSide;
+int UpdatePreviousReadings;
 
 // Constants
 const int RIGHT_INDEX_START = 0;
@@ -32,7 +34,7 @@ const int LEFT_INDEX_END = 610;
 
 const int MAX_SCAN_REP = 5;
 const float MOVEMENT_SPEED = 0.25;
-const float TURN_RATE  = 0.25;
+const float TURN_RATE  = 0.15;
 const float FOLLOW_DISTANCE = 1;
 const float SAFE_DISTANCE = 0.75;
 
@@ -49,6 +51,7 @@ void planPath();
 Direction getObstacleDirection(int pointNo);
 float getBeamAngle(int beamNumber, float angleStart, float angleIncrement);
 void SmoothScan();
+std::tr1::tuple<float,int> GetClosestPointAndDirection();
 
 // Phase methods
 void WallPhase();
@@ -167,6 +170,11 @@ void SmoothScan()
 
 void planPath()
 {
+  if(UpdatePreviousReadings)
+  {
+    // TODO
+    UpdatePreviousReadings = 0;
+  }
   switch(CurrentPhase)
   {
     case SLINE:
@@ -180,44 +188,89 @@ void planPath()
   }
 }
 
-// In the wall runner code, this moves forward only.
+// In the wall runner code, this moves forward only until a wall comes within
+// following distance.
 // In the full bug algorithm, it will follow the SLine.
 // Then it will check for a wall in front.
 void SlinePhase()
 {
-  float smallest = Smoothed_Scan[0];
-  int side  = LEFT;
-  if(Smoothed_Scan[1] < smallest && Smoothed_Scan[1] != 0)
-  {
-    smallest = Smoothed_Scan[1];
-    side = CENTER;
-  }
-  if(Smoothed_Scan[2] < smallest && Smoothed_Scan[2] != 0)
-  {
-    smallest = Smoothed_Scan[2];
-    side = RIGHT;
-  }
+  std::tr1::tuple<float, int> point = GetClosestPointAndDirection();
+  float smallest = std::tr1::get<0>(point);
+  int side = std::tr1::get<1>(point);
   if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
   {
     forward(MOVEMENT_SPEED);
   }
-  else if(smallest > SafeDist) // safe < smallest < follow
+  else if(smallest > SafeDist) // safe < smallest < follow, start following that wall
   {
     CurrentPhase = WALL;
     PreviousWallDist = smallest;
     PreviousWallSide = side;
   }
-  else // too close to wall
+  else // too close to wall -- REVERSE THRUSTERS ACTIVATE
   {
     forward(-1 * MOVEMENT_SPEED);
   }
 }
 
-// TODO see pseudocode
+// Currently following the wall determined by the previously seen wall dist and side.
+// If the wall is currently next to us
+    // If wallDist < safetyDist
+      // Turn away and forward
+    // Else if wallDist < wallfollowDist
+      // FORWARD
+    // Else (wall way too far)
+      // turn towards and forward
+// If the wall is in front of us
+  // Turn
+
+// The above is likely amazingly flawed but it will be a start.
 void WallPhase()
 {
-  // If wall went further away, turn towards that side
-  // If it got closer, consider adjusting (turning away)
+  std::tr1::tuple<float, int> point = GetClosestPointAndDirection();
+  float smallest = std::tr1::get<0>(point);
+  int side = std::tr1::get<1>(point);
+
+  if(PreviousWallSide ==  CENTER)
+  {
+    turn(TURN_RATE);
+    PreviousWallSide = RIGHT;
+    PreviousWallDist = Smoothed_Scan[CENTER];
+  }
+  else // following wall is on side
+  {
+    float currentWallDist = Smoothed_Scan[PreviousWallSide];
+    if(currentWallDist < SAFE_DISTANCE)
+    {
+      if(Smoothed_Scan[CENTER] < FOLLOW_DISTANCE)
+      {
+        PreviousWallSide = CENTER;
+        PreviousWallDist = Smoothed_Scan[CENTER];
+      }
+
+      float rotationModifier = 1;
+      if(PreviousWallSide == LEFT)
+      {
+        rotationModifier = -1;
+      }
+      turn(TURN_RATE * rotationModifier);
+    }
+    else if(currentWallDist < FOLLOW_DISTANCE)
+    {
+      forward(MOVEMENT_SPEED);
+    }
+    else
+    {
+      float rotationModifier = 1;
+      if(PreviousWallSide == RIGHT)
+      {
+        rotationModifier = -1;
+      }
+      turn(TURN_RATE * rotationModifier);
+    }
+
+    UpdatePreviousReadings = 1;
+  }
 }
 
 float getBeamAngle(int beamNumber, float angleStart, float angleIncrement )
@@ -239,4 +292,29 @@ Direction getObstacleDirection(int pointNo)
   {
     return RIGHT;
   }
+}
+
+// Returns <dist, side> for the smoothed vision.
+// Returns a distance of 9999 and side of NONE if everything is out of range
+std::tr1::tuple<float, int> GetClosestPointAndDirection()
+{
+  float smallest = 9999;
+  int side = NONE;
+
+  if(Smoothed_Scan[0] < smallest && Smoothed_Scan[0] != 0)
+  {
+    Smoothed_Scan[0];
+  }
+
+  if(Smoothed_Scan[1] < smallest && Smoothed_Scan[1] != 0)
+  {
+    smallest = Smoothed_Scan[1];
+    side = CENTER;
+  }
+  if(Smoothed_Scan[2] < smallest && Smoothed_Scan[2] != 0)
+  {
+    smallest = Smoothed_Scan[2];
+    side = RIGHT;
+  }
+  return std::tr1::make_tuple(smallest, side);
 }
