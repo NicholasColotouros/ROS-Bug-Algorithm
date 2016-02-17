@@ -43,12 +43,14 @@ const int RIGHT_INDEX_END = 150;
 const int LEFT_INDEX_START = 450;
 const int LEFT_INDEX_END = 610;
 
-const int MAX_SCAN_REP = 5;
-const float MOVEMENT_SPEED = 0.25;
+const float MOVEMENT_SPEED = 0.05;
 const float TURN_RATE  = 0.15;
-const float FOLLOW_DISTANCE = 1.5;
-const float SAFE_DISTANCE = 0.75;
 
+const float FOLLOW_DISTANCE = 1.5;
+const float SAFE_DISTANCE = 1;
+
+const int MAX_SCAN_REP = 5;
+const float TURN_WAIT_TIME_SECONDS = 0.5;
 
 ///////////////////////////////////
 /////// METHOD DECLARATIONS ///////
@@ -77,11 +79,11 @@ int main(int argc, char **argv)
   FollowWallSide = NONE;
 
   // All systems ready. BEGIN.
-  ros::Subscriber sub = n.subscribe<sensor_msgs::LaserScan>("/scan", 1000, ProcessLaserScan);
+  ros::Subscriber sub = n.subscribe<sensor_msgs::LaserScan>("/scan", 1, ProcessLaserScan);
   ros::spin();
 }
 
-void forward(float dist)
+void Forward(float dist)
 {
   Cmd.linear.x = dist;
   Cmd.linear.y = 0;
@@ -92,7 +94,7 @@ void forward(float dist)
   Velocity_publisher.publish(Cmd);
 }
 
-void turn(float rad)
+void Turn(float rad)
 {
   Cmd.linear.x = 0;
   Cmd.linear.y = 0;
@@ -112,7 +114,7 @@ void TurnAway(float rad)
   {
     turnModifier = -1;
   }
-  turn(turnModifier * rad);
+  Turn(turnModifier * rad);
 }
 
 // Returns <dist, side> for the smoothed vision.
@@ -145,22 +147,15 @@ std::tr1::tuple<float, int> GetClosestPointAndDirection()
 // Called by MakeSmoothScan()
 float CalculateAverageBetweenScanPoints(int start, int end)
 {
-  int countedPoints = 0;
-  float total = 0;
+  float smallest = 9999;
   for(int i = start; i < end; i++)
   {
-    if(Raw_Scan[i] == Raw_Scan[i])
+    if(Raw_Scan[i] == Raw_Scan[i] && smallest > Raw_Scan[i])
     {
-      total += Raw_Scan[i];
-      countedPoints++;
+      smallest = Raw_Scan[i];
     }
   }
-  if(countedPoints == 0)
-  {
-    return 0;
-  }
-
-  return total/countedPoints;
+  return smallest;
 }
 
 // Calculates the averages of the left, right and center points
@@ -249,14 +244,26 @@ void SlinePhase()
   int side = std::tr1::get<1>(point);
   if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
   {
-    forward(MOVEMENT_SPEED);
+    Forward(MOVEMENT_SPEED);
   }
   else if(smallest > SAFE_DISTANCE) // safe < smallest < follow, start following that wall
   {
-    CurrentPhase = WALL;
+    CurrentPhase = WALL; // Next phase is guaranteed to be wall following
 
     // Pick a side to put the wall
-    if(side == CENTER || side == RIGHT)
+    if(side == CENTER)
+    {
+      if(Smoothed_Scan[LEFT] < Smoothed_Scan[RIGHT])
+      {
+        FollowWallSide = LEFT;
+      }
+      else
+      {
+        FollowWallSide = RIGHT;
+      }
+      printf("Side decided: %s\n", DirectionString[FollowWallSide]);
+    }
+    else if(side == RIGHT)
     {
       FollowWallSide = RIGHT;
     }
@@ -264,12 +271,11 @@ void SlinePhase()
     {
       FollowWallSide = LEFT;
     }
-    TurnAway(TURN_RATE * 2); // turn away from the wall
-    printf("Turning %s\n", DirectionString[2-FollowWallSide]);
+    TurnAway(TURN_RATE * 2); // turn away from the wall in front
   }
   else // too close to wall -- REVERSE THRUSTERS ACTIVATE
   {
-    forward(-1 * MOVEMENT_SPEED);
+    Forward(-1 * MOVEMENT_SPEED);
   }
 }
 
@@ -277,11 +283,14 @@ void SlinePhase()
 void WallPhase()
 {
   printf("%f %s\t", Smoothed_Scan[FollowWallSide], DirectionString[FollowWallSide]);
+  printf("LEFT: %f\t CENTER: %f\t RIGHT: %f\n", Smoothed_Scan[LEFT], Smoothed_Scan[CENTER], Smoothed_Scan[RIGHT]);
 
   // Turn away if there is a wall in front
-  if(Smoothed_Scan[CENTER] < SAFE_DISTANCE)
+  if(Smoothed_Scan[CENTER] < FOLLOW_DISTANCE)
   {
     TurnAway(TURN_RATE * 2); // 90 degrees
+    ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
+    Forward(MOVEMENT_SPEED/2);
     printf("Wall in front, turning %s\t", DirectionString[2 - FollowWallSide]);
   }
   else // No wall in front of us
@@ -292,18 +301,22 @@ void WallPhase()
     if(wallDist < SAFE_DISTANCE)
     {
       TurnAway(TURN_RATE);
+      ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
+      Forward(MOVEMENT_SPEED/2);
       printf("Too close, turning %s\t", DirectionString[2 - FollowWallSide]);
     }
     // Turn towards if the wall we're following is too far
     else if(wallDist > FOLLOW_DISTANCE)
     {
       TurnAway(-1*TURN_RATE);
+      ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
+      Forward(MOVEMENT_SPEED/2);
       printf("Too far. Turning %s\t", DirectionString[FollowWallSide]);
     }
     // Distance is just right
     else
     {
-      forward(MOVEMENT_SPEED);
+      Forward(MOVEMENT_SPEED);
       printf("CHOO CHOO\t");
     }
   }
