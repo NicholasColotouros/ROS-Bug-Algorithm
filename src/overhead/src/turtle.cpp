@@ -42,11 +42,6 @@ kobuki_msgs::MotorPower Msg_motor;
 ///////////////////////////////////
 //////////// CONSTANTS ////////////
 ///////////////////////////////////
-const int RIGHT_INDEX_START = 0;  // Which indices determine the vision for left, right and center parts of vision
-const int RIGHT_INDEX_END = 150;
-const int LEFT_INDEX_START = 450;
-const int LEFT_INDEX_END = 610;
-
 const float MOVEMENT_SPEED = 0.05;
 const float TURN_RATE  = 0.15;
 
@@ -54,8 +49,8 @@ const float FOLLOW_DISTANCE = 1.5;
 const float SAFE_DISTANCE = 1;
 
 const int MAX_SCAN_REP = 5;
-const float CORNER_DROPOFF_DELTA = 1; // Used to detect how far of a difference in readings consists of a corner
-const float TURN_WAIT_TIME_SECONDS = 0.5;
+const float CORNER_DROPOFF_DELTA = 0.75;  // Used to detect how far of a difference in readings consists of a corner
+const float TURN_WAIT_TIME_SECONDS = 0.5; // A few actions move and turn, this is the delay between the two
 
 ///////////////////////////////////
 /////// METHOD DECLARATIONS ///////
@@ -168,10 +163,15 @@ float GetClosestPointInRange(int start, int end)
 // for smoothed vision (average of the left right and center points)
 void MakeSmoothScan()
 {
+  const int right_index_start = 0;
+  const int right_index_end = 150;
+  const int left_index_start = 450;
+  const int Left_index_end = 610;
+
   // Right side
-  Smoothed_Scan[0] = GetClosestPointInRange(LEFT_INDEX_START, LEFT_INDEX_END);
-  Smoothed_Scan[1] = GetClosestPointInRange(RIGHT_INDEX_END, LEFT_INDEX_START);
-  Smoothed_Scan[2] = GetClosestPointInRange(RIGHT_INDEX_START, RIGHT_INDEX_END);
+  Smoothed_Scan[0] = GetClosestPointInRange(left_index_start, Left_index_end);
+  Smoothed_Scan[1] = GetClosestPointInRange(right_index_end, left_index_start);
+  Smoothed_Scan[2] = GetClosestPointInRange(right_index_start, right_index_end);
 }
 
 
@@ -216,17 +216,6 @@ void ProcessLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan)
 
 void PlanPath()
 {
-  // TODO: implement for phase 2 of bug algo under WALL case:
-  // IF robot is on SLINE
-    // IF robot is facing the goal AND there is a wall in front
-      // Follow the wall -- potential bug would be that this gets stuck within tolerances
-    // ELSE
-      // Change phase to SLINE phase
-        // The SLine phase will then turn towards the goal and either
-          // Follow the new wall right in front of it
-          // Move towards the goal
-  // ELSE
-    // Follow Wall
   switch(CurrentPhase)
   {
     case SLINE:
@@ -259,9 +248,9 @@ void SlinePhase()
   }
   else if(smallest > SAFE_DISTANCE) // safe < smallest < follow, start following that wall
   {
-    CurrentPhase = WALL; // Next phase is guaranteed to be wall following
+    CurrentPhase = WALL;
 
-    // Pick a side to put the wall
+    // Pick a side to put the wall and change the phase
     if(side == CENTER)
     {
       if(Smoothed_Scan[LEFT] < Smoothed_Scan[RIGHT])
@@ -272,7 +261,6 @@ void SlinePhase()
       {
         FollowWallSide = RIGHT;
       }
-      printf("Side decided: %s\n", DirectionString[FollowWallSide]);
     }
     else if(side == RIGHT)
     {
@@ -282,9 +270,7 @@ void SlinePhase()
     {
       FollowWallSide = LEFT;
     }
-
     PreviousWallDist = Smoothed_Scan[FollowWallSide];
-    TurnAway(TURN_RATE * 2); // turn away from the wall in front
   }
   else // too close to wall -- REVERSE THRUSTERS ACTIVATE
   {
@@ -292,66 +278,64 @@ void SlinePhase()
   }
 }
 
-// TODO
+// This phase is responsible for following the wall.
+// The robot will adjust itself based on its proximity to the wall it has decided to follow.
 void WallPhase()
 {
-  printf("%f %s\t", Smoothed_Scan[FollowWallSide], DirectionString[FollowWallSide]);
-  printf("LEFT: %f\t CENTER: %f\t RIGHT: %f\n", Smoothed_Scan[LEFT], Smoothed_Scan[CENTER], Smoothed_Scan[RIGHT]);
-
   // Turn away if there is a wall in front
-  if(Smoothed_Scan[CENTER] < FOLLOW_DISTANCE)
+  if(Smoothed_Scan[CENTER] < SAFE_DISTANCE)
   {
-    TurnAway(TURN_RATE * 2); // 90 degrees
-    ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
-    Forward(MOVEMENT_SPEED/2);
-    printf("Wall in front, turning %s\t", DirectionString[2 - FollowWallSide]);
+    TurnAway(TURN_RATE * 2);
   }
   else // No wall in front of us
   {
     float wallDist = Smoothed_Scan[FollowWallSide];
 
-    // Turn away if the wall we're following is too close
-    if(wallDist < SAFE_DISTANCE)
-    {
-      TurnAway(TURN_RATE);
-      ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
-      Forward(MOVEMENT_SPEED/2);
-      printf("Too close, turning %s\t", DirectionString[2 - FollowWallSide]);
-    }
-    else if(PreviousWallDist - wallDist > CORNER_DROPOFF_DELTA) // Dropoff was too big, we just saw a corner (or similar)
+    if( abs(PreviousWallDist - wallDist) > CORNER_DROPOFF_DELTA) // Dropoff was too big, we just saw a corner (or similar)
     {
       CurrentPhase = CORNER;
       CurrentCornerPhase = MOVE;
+    }
+    // Turn away if the wall we're following is too close
+    else if(wallDist < SAFE_DISTANCE)
+    {
+      TurnAway(TURN_RATE);
     }
     else if(wallDist > FOLLOW_DISTANCE) // Wall too far but not corner, turn towards it
     {
       TurnAway(-1*TURN_RATE);
       ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
       Forward(MOVEMENT_SPEED/2);
-      printf("Too far. Turning %s\t", DirectionString[FollowWallSide]);
     }
     // Distance is just right
     else
     {
       Forward(MOVEMENT_SPEED);
-      printf("CHOO CHOO\t");
     }
   }
-  printf("\n" );
 }
 
 void CornerPhase()
 {
-  printf("CORNER: %s\n", CornerString[CurrentCornerPhase]);
   if(CurrentCornerPhase == MOVE)
   {
-    Forward(MOVEMENT_SPEED * 5);
+    float boost_into_doorway_speed = 1.10;
+    TurnAway(TURN_RATE * 2);
+    ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
+    Forward(boost_into_doorway_speed); // Get a good ways into the doorway
     CurrentCornerPhase = TURN;
   }
   else if(CurrentCornerPhase == TURN)
   {
-    TurnAway(-3.14/4); // Turn 45 degrees towards where the wall should be
-    CurrentCornerPhase = ADJUST;
+    // Turn towards the wall until we can see the wall again and then move to adjust phase
+    if(Smoothed_Scan[FollowWallSide] < FOLLOW_DISTANCE)
+    {
+      CurrentCornerPhase = ADJUST;
+    }
+    else
+    {
+      TurnAway(-1 * TURN_RATE);
+    }
   }
   else // Adjust phase
   {
