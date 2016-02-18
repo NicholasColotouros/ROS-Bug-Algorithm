@@ -26,7 +26,7 @@ int CurrentPhase;         // What planning phase the robot is in
 int CurrentCornerPhase;   // How far we are in our process of turning corners
 int Num_Points;           // The number of points in the raw scan
 float Raw_Scan[1000];     // The raw readings by the scanner
-float Smoothed_Scan[3];   // Left, Right, Middle averages
+float Smoothed_Scan[3];   // Closest points of the Left, Right, Middle middle parts of the scan
 int CurrentScanRep;       // Current repetition of the scan
 int FollowWallSide;       // Tells use which side the wall we're following is on/should be
 float PreviousWallDist;
@@ -317,7 +317,7 @@ void WallPhase()
 
 void CornerPhase()
 {
-  if(CurrentCornerPhase == MOVE)
+  if(CurrentCornerPhase == MOVE) // Try to get a good ways into the doorway or distance
   {
     float boost_into_doorway_speed = 1.10;
     TurnAway(TURN_RATE * 2);
