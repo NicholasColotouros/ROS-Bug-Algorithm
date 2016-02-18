@@ -12,8 +12,10 @@
 ///////////////////////////////////
 
 // Enums -- In part 1, SLINE just moves the robot forward.
-enum PlanningPhase { SLINE, WALL };
-char* phaseString[] = { "SLINE", "WALL" }; // TODO: remove once debugging is complete
+enum PlanningPhase { SLINE, WALL, CORNER };
+char* phaseString[] = { "SLINE", "WALL", "CORNER" }; // TODO: remove once debugging is complete
+enum CornerSubPhase { MOVE, TURN, ADJUST };
+char* CornerString[] = {"MOVE", "TURN", "ADJUST"};
 enum Direction { LEFT, CENTER, RIGHT, NONE };
 char* DirectionString[] = {"LEFT", "CENTER", "RIGHT", "NONE" }; // TODO: remove once debugging is complete
 
@@ -21,11 +23,13 @@ char* DirectionString[] = {"LEFT", "CENTER", "RIGHT", "NONE" }; // TODO: remove 
 ///////// STATE VARIABLES /////////
 ///////////////////////////////////
 int CurrentPhase;         // What planning phase the robot is in
+int CurrentCornerPhase;   // How far we are in our process of turning corners
 int Num_Points;           // The number of points in the raw scan
 float Raw_Scan[1000];     // The raw readings by the scanner
 float Smoothed_Scan[3];   // Left, Right, Middle averages
 int CurrentScanRep;       // Current repetition of the scan
 int FollowWallSide;       // Tells use which side the wall we're following is on/should be
+float PreviousWallDist;
 
 ///////////////////////////////////
 ////////// ROS VARIABLES //////////
@@ -38,7 +42,7 @@ kobuki_msgs::MotorPower Msg_motor;
 ///////////////////////////////////
 //////////// CONSTANTS ////////////
 ///////////////////////////////////
-const int RIGHT_INDEX_START = 0;
+const int RIGHT_INDEX_START = 0;  // Which indices determine the vision for left, right and center parts of vision
 const int RIGHT_INDEX_END = 150;
 const int LEFT_INDEX_START = 450;
 const int LEFT_INDEX_END = 610;
@@ -50,6 +54,7 @@ const float FOLLOW_DISTANCE = 1.5;
 const float SAFE_DISTANCE = 1;
 
 const int MAX_SCAN_REP = 5;
+const float CORNER_DROPOFF_DELTA = 1; // Used to detect how far of a difference in readings consists of a corner
 const float TURN_WAIT_TIME_SECONDS = 0.5;
 
 ///////////////////////////////////
@@ -59,6 +64,7 @@ void ProcessLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan);
 void PlanPath();
 void WallPhase();
 void SlinePhase();
+void CornerPhase();
 
 ///////////////////////////////////
 ///// MAIN AND HELPER METHODS /////
@@ -77,6 +83,7 @@ int main(int argc, char **argv)
   // Robot state initialization
   CurrentPhase = SLINE;
   FollowWallSide = NONE;
+  PreviousWallDist = 9999;
 
   // All systems ready. BEGIN.
   ros::Subscriber sub = n.subscribe<sensor_msgs::LaserScan>("/scan", 1, ProcessLaserScan);
@@ -142,10 +149,9 @@ std::tr1::tuple<float, int> GetClosestPointAndDirection()
   return std::tr1::make_tuple(smallest, side);
 }
 
-// Calculates the average between the Raw Scan reading.
-// From start (inclusive) to end (exclusive)
+// Finds the closest point in the Raw Scan reading from start (inclusive) to end (exclusive).
 // Called by MakeSmoothScan()
-float CalculateAverageBetweenScanPoints(int start, int end)
+float GetClosestPointInRange(int start, int end)
 {
   float smallest = 9999;
   for(int i = start; i < end; i++)
@@ -158,14 +164,14 @@ float CalculateAverageBetweenScanPoints(int start, int end)
   return smallest;
 }
 
-// Calculates the averages of the left, right and center points
+// Calculates the closest points of the left, right and center points
 // for smoothed vision (average of the left right and center points)
 void MakeSmoothScan()
 {
   // Right side
-  Smoothed_Scan[0] = CalculateAverageBetweenScanPoints(LEFT_INDEX_START, LEFT_INDEX_END);
-  Smoothed_Scan[1] = CalculateAverageBetweenScanPoints(RIGHT_INDEX_END, LEFT_INDEX_START);
-  Smoothed_Scan[2] = CalculateAverageBetweenScanPoints(RIGHT_INDEX_START, RIGHT_INDEX_END);
+  Smoothed_Scan[0] = GetClosestPointInRange(LEFT_INDEX_START, LEFT_INDEX_END);
+  Smoothed_Scan[1] = GetClosestPointInRange(RIGHT_INDEX_END, LEFT_INDEX_START);
+  Smoothed_Scan[2] = GetClosestPointInRange(RIGHT_INDEX_START, RIGHT_INDEX_END);
 }
 
 
@@ -227,11 +233,16 @@ void PlanPath()
       SlinePhase();
       break;
 
+    case CORNER:
+      CornerPhase();
+      break;
+
     case WALL:
     default:
       WallPhase();
       break;
   }
+  PreviousWallDist = Smoothed_Scan[FollowWallSide];
 }
 
 // In the wall runner code, this moves forward only until a wall comes within following distance.
@@ -271,6 +282,8 @@ void SlinePhase()
     {
       FollowWallSide = LEFT;
     }
+
+    PreviousWallDist = Smoothed_Scan[FollowWallSide];
     TurnAway(TURN_RATE * 2); // turn away from the wall in front
   }
   else // too close to wall -- REVERSE THRUSTERS ACTIVATE
@@ -305,8 +318,12 @@ void WallPhase()
       Forward(MOVEMENT_SPEED/2);
       printf("Too close, turning %s\t", DirectionString[2 - FollowWallSide]);
     }
-    // Turn towards if the wall we're following is too far
-    else if(wallDist > FOLLOW_DISTANCE)
+    else if(PreviousWallDist - wallDist > CORNER_DROPOFF_DELTA) // Dropoff was too big, we just saw a corner (or similar)
+    {
+      CurrentPhase = CORNER;
+      CurrentCornerPhase = MOVE;
+    }
+    else if(wallDist > FOLLOW_DISTANCE) // Wall too far but not corner, turn towards it
     {
       TurnAway(-1*TURN_RATE);
       ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
@@ -321,4 +338,24 @@ void WallPhase()
     }
   }
   printf("\n" );
+}
+
+void CornerPhase()
+{
+  printf("CORNER: %s\n", CornerString[CurrentCornerPhase]);
+  if(CurrentCornerPhase == MOVE)
+  {
+    Forward(MOVEMENT_SPEED * 5);
+    CurrentCornerPhase = TURN;
+  }
+  else if(CurrentCornerPhase == TURN)
+  {
+    TurnAway(-3.14/4); // Turn 45 degrees towards where the wall should be
+    CurrentCornerPhase = ADJUST;
+  }
+  else // Adjust phase
+  {
+    CurrentPhase = WALL;
+    CurrentCornerPhase = 0;
+  }
 }
