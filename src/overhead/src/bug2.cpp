@@ -235,7 +235,7 @@ void MakeSmoothScan()
 }
 
 // Check if we're currently on the sline
-bool CheckIfOnSline(double CurrentX)
+bool CheckIfOnSline()
 {
   double slope  = (EndY - StartY) / (EndX - StartX);
   double offset = EndY - slope * EndX;
@@ -358,10 +358,10 @@ void SlinePhase()
     TurnTowardsDestination();
     ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
 
-    if(CheckIfOnSline(CurrentX, CurrentY)) // Move towards the goal if we're on the line
+    if(CheckIfOnSline()) // Move towards the goal if we're on the line
     {
       // Move towards the goal if we're facing it
-      if(abs(WorldAngle - ConvertDegToRad(EulerAngles[2])) < SLINE_TOLERANCE)
+      if(fabs(WorldAngle - ConvertDegToRad(EulerAngles[2])) < SLINE_TOLERANCE)
       {
         double dx = EndX - StartX;
         double dy = EndY - StartY;
@@ -419,11 +419,11 @@ void WallPhase()
 {
   // If we're on the Sline within a certain margin of error and not where we last saw the wall,
   // It's time to turn towards the goal and follow the Sline
-  if(abs(WallStartX - CurrentX) < SLINE_TOLERANCE * 10
-    && WallStartY - CurrentY) < SLINE_TOLERANCE * 10)
-    && CheckIfOnSline()
+  if(fabs(WallStartX - CurrentX) < SLINE_TOLERANCE * 10
+    && fabs(WallStartY - CurrentY) < SLINE_TOLERANCE * 10
+    && CheckIfOnSline())
   {
-    state = SLINE;
+    CurrentPhase = SLINE;
   }
   // Turn away if there is a wall in front
   else if(Smoothed_Scan[CENTER] < SAFE_DISTANCE)
@@ -434,7 +434,7 @@ void WallPhase()
   {
     float wallDist = Smoothed_Scan[FollowWallSide];
 
-    if( abs(PreviousWallDist - wallDist) > CORNER_DROPOFF_DELTA) // Dropoff was too big, we just saw a corner (or similar)
+    if( fabs(PreviousWallDist - wallDist) > CORNER_DROPOFF_DELTA) // Dropoff was too big, we just saw a corner (or similar)
     {
       CurrentPhase = CORNER;
       CurrentCornerPhase = MOVE;
