@@ -117,9 +117,15 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
-add_executable(turtle src/turtle.cpp)
-target_link_libraries(turtle ${catkin_LIBRARIES})
-add_dependencies(turtle overhead)
+add_executable(wall_follow src/wall_follow.cpp)
+target_link_libraries(wall_follow ${catkin_LIBRARIES})
+add_dependencies(wall_follow overhead)
+
+
+add_executable(bug2 src/bug2.cpp)
+target_link_libraries(bug2 ${catkin_LIBRARIES})
+add_dependencies(bug2 overhead)
+
 ## Declare a C++ library
 # add_library(overhead
 #   src/${PROJECT_NAME}/overhead.cpp

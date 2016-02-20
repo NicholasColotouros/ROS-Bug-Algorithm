@@ -6,6 +6,9 @@
 #include <sensor_msgs/LaserScan.h>
 #include <geometry_msgs/Twist.h>
 #include <kobuki_msgs/MotorPower.h>
+#include <gazebo_msgs/ModelStates.h>
+#include <geometry_msgs/Pose.h>
+#include <math.h>
 
 ///////////////////////////////////
 ////////////// ENUMS //////////////
@@ -13,11 +16,8 @@
 
 // Enums -- In part 1, SLINE just moves the robot forward.
 enum PlanningPhase { SLINE, WALL, CORNER };
-char* phaseString[] = { "SLINE", "WALL", "CORNER" }; // TODO: remove once debugging is complete
-enum CornerSubPhase { MOVE, TURN, ADJUST };
-char* CornerString[] = {"MOVE", "TURN", "ADJUST"};
+enum CornerSubPhase { MOVE, TURN };
 enum Direction { LEFT, CENTER, RIGHT, NONE };
-char* DirectionString[] = {"LEFT", "CENTER", "RIGHT", "NONE" }; // TODO: remove once debugging is complete
 
 ///////////////////////////////////
 ///////// STATE VARIABLES /////////
@@ -29,15 +29,34 @@ float Raw_Scan[1000];     // The raw readings by the scanner
 float Smoothed_Scan[3];   // Closest points of the Left, Right, Middle middle parts of the scan
 int CurrentScanRep;       // Current repetition of the scan
 int FollowWallSide;       // Tells use which side the wall we're following is on/should be
-float PreviousWallDist;
+float PreviousWallDist;   // Wall distance being followed from the last reading
+bool GPSInitialized;      // Flag used to determine if the start position has been set
 
+// Positioning variables. Doubles used instead of floats for accuracy
+double StartX;
+double StartY;
+double CurrentX;
+double CurrentY;
+double EndX;
+double EndY;
+
+double WallStartX;  // Used to track where we last saw the wall when we started following
+double WallStartY;
+
+double WorldAngle;    // Angle of robot to goal with respect to world
+double EulerAngles[3];
 ///////////////////////////////////
 ////////// ROS VARIABLES //////////
 ///////////////////////////////////
 ros::Publisher Motors_publisher;
 ros::Publisher Velocity_publisher;
+ros::Publisher Position_publisher;
+ros::Publisher Pose_publisher;
+
 geometry_msgs::Twist Cmd;
 kobuki_msgs::MotorPower Msg_motor;
+geometry_msgs::Pose Msg_pose;
+gazebo_msgs::ModelStates Msg_model;
 
 ///////////////////////////////////
 //////////// CONSTANTS ////////////
@@ -51,29 +70,41 @@ const float SAFE_DISTANCE = 1;
 const int MAX_SCAN_REP = 5;
 const float CORNER_DROPOFF_DELTA = 0.75;  // Used to detect how far of a difference in readings consists of a corner
 const float TURN_WAIT_TIME_SECONDS = 0.5; // A few actions move and turn, this is the delay between the two
+const float SLINE_TOLERANCE = 0.01;
 
+const double PI = 3.14159;
 ///////////////////////////////////
-/////// METHOD DECLARATIONS ///////
+/////// METHOD DECLARATIONS /////// These are the important methods
 ///////////////////////////////////
 void ProcessLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan);
+void ProcessGPS(const gazebo_msgs::ModelStates& gpsScan);
 void PlanPath();
 void WallPhase();
 void SlinePhase();
 void CornerPhase();
 
 ///////////////////////////////////
-///// MAIN AND HELPER METHODS /////
+///// MAIN AND HELPER METHODS ///// The important methods are at the bottom.
 ///////////////////////////////////
 int main(int argc, char **argv)
 {
-  ros::init(argc, argv, "wallrunner");
+  ros::init(argc, argv, "bug2");
 
   // Ros turn on overhead
   ros::NodeHandle n;
+
+  // Get params
+  n.getParam("bugAlg/goal_x", EndX);
+  n.getParam("bugAlg/goal_y", EndY);
+
+  // Turn on engine
 	Motors_publisher = n.advertise<kobuki_msgs::MotorPower>("/mobile_base/commands/motor_power", 1);
   Velocity_publisher = n.advertise<geometry_msgs::Twist>("/mobile_base/commands/velocity", 1);
   Msg_motor.state = 1;
-  Motors_publisher.publish(Msg_motor); //enable engine!
+  Motors_publisher.publish(Msg_motor);
+
+  // GPS Subscriber
+  n.subscribe("/gazebo/model_states", 1, ProcessGPS);
 
   // Robot state initialization
   CurrentPhase = SLINE;
@@ -93,6 +124,18 @@ void Forward(float dist)
   Cmd.angular.x = 0;
   Cmd.angular.y = 0;
   Cmd.angular.z = 0;
+  Velocity_publisher.publish(Cmd);
+}
+
+void MoveAndTurn(float x, float y)
+{
+  Cmd.angular.x = 0;
+  Cmd.angular.y = 0;
+  Cmd.angular.z = 0;
+
+  Cmd.linear.x = x;
+  Cmd.linear.y = y;
+  Cmd.linear.z = 0;
   Velocity_publisher.publish(Cmd);
 }
 
@@ -117,6 +160,23 @@ void TurnAway(float rad)
     turnModifier = -1;
   }
   Turn(turnModifier * rad);
+}
+
+// Turn towards the destination
+void TurnTowardsDestination()
+{
+  double turnAngle = WorldAngle - EulerAngles[2];
+  double turnsToComplete = 5;
+
+  Cmd.linear.x = 0;
+  Cmd.linear.y = 0;
+  Cmd.linear.z = 0;
+
+  Cmd.angular.x = 0;
+  Cmd.angular.y = 0;
+  Cmd.angular.z = turnAngle/turnsToComplete;
+
+  Velocity_publisher.publish(Cmd);
 }
 
 // Returns <dist, side> for the smoothed vision.
@@ -174,10 +234,61 @@ void MakeSmoothScan()
   Smoothed_Scan[2] = GetClosestPointInRange(right_index_start, right_index_end);
 }
 
+// Check if we're currently on the sline
+bool CheckIfOnSline(double CurrentX)
+{
+  double slope  = (EndY - StartY) / (EndX - StartX);
+  double offset = EndY - slope * EndX;
+
+  // We don't need exactly the point on the line. We have some tolerance.
+  if( CurrentY <= CurrentX * slope + offset + 1
+    && CurrentY >= slope * CurrentX + offset - 1)
+  {
+    return true;
+  }
+  return false;
+}
+
+float ConvertDegToRad(float deg)
+{
+  return 2 * PI * (deg/360);
+}
 
 ///////////////////////////////////
 ///////// PLANNER METHODS /////////
 ///////////////////////////////////
+
+// Called by the geolocation subscribed topic. Updates the bots position and orientation
+void ProcessGPS(const gazebo_msgs::ModelStates& gpsScan)
+{
+  // Note the start position upon reception of the first message
+  if(!GPSInitialized)
+  {
+    StartX = gpsScan.pose[2].position.x;
+    StartY = gpsScan.pose[2].position.y;
+    GPSInitialized = true;
+  }
+
+  CurrentX = gpsScan.pose[2].position.x;
+  CurrentY = gpsScan.pose[2].position.y;
+
+  WorldAngle = atan2(EndX - CurrentY, EndX - CurrentX);
+
+  // Calculate Euler angles
+  double quatx = gpsScan.pose[2].orientation.x;
+  double quaty = gpsScan.pose[2].orientation.y;
+  double quatz = gpsScan.pose[2].orientation.z;
+  double quatw = gpsScan.pose[2].orientation.w;
+
+  double x2 = pow(quatx, 2);
+  double y2 = pow(quaty, 2);
+  double z2 = pow(quatz, 2);
+  double w2 = pow(quatw, 2);
+
+  EulerAngles[0] = (atan2(2.0 * (quaty * quatz + quatx * quatw),(-x2 - y2 + z2 + w2)) * (180.0/PI));
+  EulerAngles[1] = (asin(-2.0 * (quatx * quatz - quaty * quatw)) * (180.0/PI));
+  EulerAngles[2] = (atan2(2.0 * (quatx * quaty + quatz * quatw),(x2 - y2 - z2 + w2)) * (180.0/PI));
+}
 
 // Scan the number of times specified by maxScanRep before moving. This is to prevent magical NaN misreads.
 // Then take the smallest non-NaN reading or use NaN if that was all that was read to plan the next move.
@@ -244,7 +355,32 @@ void SlinePhase()
   int side = std::tr1::get<1>(point);
   if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
   {
-    Forward(MOVEMENT_SPEED);
+    TurnTowardsDestination();
+    ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
+
+    if(CheckIfOnSline(CurrentX, CurrentY)) // Move towards the goal if we're on the line
+    {
+      // Move towards the goal if we're facing it
+      if(abs(WorldAngle - ConvertDegToRad(EulerAngles[2])) < SLINE_TOLERANCE)
+      {
+        double dx = EndX - StartX;
+        double dy = EndY - StartY;
+        double normalizationFactor = sqrt(dy*dy + dx*dx); // Normalize the direction so we go the same speed at any distance
+        double speedFactor = 1.15; // Otherwise it will be too slow
+        double moveX = (dx/normalizationFactor) * speedFactor;
+        double moveY = (dy/normalizationFactor) * speedFactor;
+        MoveAndTurn(moveX, moveY);
+      }
+      else // keep turning
+      {
+        TurnTowardsDestination();
+      }
+    }
+    else // Not on Sline and need to follow it
+    {
+      TurnTowardsDestination();
+      Forward(TURN_RATE);
+    }
   }
   else if(smallest > SAFE_DISTANCE) // safe < smallest < follow, start following that wall
   {
@@ -270,7 +406,6 @@ void SlinePhase()
     {
       FollowWallSide = LEFT;
     }
-    PreviousWallDist = Smoothed_Scan[FollowWallSide];
   }
   else // too close to wall -- REVERSE THRUSTERS ACTIVATE
   {
@@ -282,8 +417,16 @@ void SlinePhase()
 // The robot will adjust itself based on its proximity to the wall it has decided to follow.
 void WallPhase()
 {
+  // If we're on the Sline within a certain margin of error and not where we last saw the wall,
+  // It's time to turn towards the goal and follow the Sline
+  if(abs(WallStartX - CurrentX) < SLINE_TOLERANCE * 10
+    && WallStartY - CurrentY) < SLINE_TOLERANCE * 10)
+    && CheckIfOnSline()
+  {
+    state = SLINE;
+  }
   // Turn away if there is a wall in front
-  if(Smoothed_Scan[CENTER] < SAFE_DISTANCE)
+  else if(Smoothed_Scan[CENTER] < SAFE_DISTANCE)
   {
     TurnAway(TURN_RATE * 2);
   }
@@ -327,19 +470,15 @@ void CornerPhase()
   }
   else if(CurrentCornerPhase == TURN)
   {
-    // Turn towards the wall until we can see the wall again and then move to adjust phase
+    // Turn towards the wall until we can see the wall again and then follow it
     if(Smoothed_Scan[FollowWallSide] < FOLLOW_DISTANCE)
     {
-      CurrentCornerPhase = ADJUST;
+      CurrentPhase = WALL;
+      CurrentCornerPhase = 0;
     }
     else
     {
       TurnAway(-1 * TURN_RATE);
     }
-  }
-  else // Adjust phase
-  {
-    CurrentPhase = WALL;
-    CurrentCornerPhase = 0;
   }
 }
