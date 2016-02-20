@@ -71,6 +71,7 @@ const int MAX_SCAN_REP = 5;
 const float CORNER_DROPOFF_DELTA = 0.75;  // Used to detect how far of a difference in readings consists of a corner
 const float TURN_WAIT_TIME_SECONDS = 0.5; // A few actions move and turn, this is the delay between the two
 const float SLINE_TOLERANCE = 0.01;
+const float GOAL_TOLERANCE = 0.1; // Aim to get this far from goal
 
 const double PI = 3.14159;
 ///////////////////////////////////
@@ -327,6 +328,14 @@ void ProcessLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan)
 
 void PlanPath()
 {
+  // If we're close enough to the goal, turn off
+  double distFromGoal = sqrt(pow(CurrentX - EndX, 2) + pow(CurrentX - EndX, 2));
+  if (distFromGoal < GOAL_TOLERANCE)
+  {
+    Msg_motor.state = 0;
+    Motors_publisher.publish(Msg_motor);
+  }
+
   switch(CurrentPhase)
   {
     case SLINE:
@@ -350,66 +359,66 @@ void PlanPath()
 // Then it will check for a wall in front.
 void SlinePhase()
 {
+  // If facing goal
+    // if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
+      // rotate towards goals
+      // delay
+      // move towards goal
+    // else // facing goal and wall in front
+      // remember location as lastWall, follow that wall
+  // else// not facing goal
+    // turn towards goal
   std::tr1::tuple<float, int> point = GetClosestPointAndDirection();
   float smallest = std::tr1::get<0>(point);
   int side = std::tr1::get<1>(point);
-  if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
-  {
-    TurnTowardsDestination();
-    ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
 
-    if(CheckIfOnSline()) // Move towards the goal if we're on the line
-    {
-      // Move towards the goal if we're facing it
-      if(fabs(WorldAngle - ConvertDegToRad(EulerAngles[2])) < SLINE_TOLERANCE)
-      {
-        double dx = EndX - StartX;
-        double dy = EndY - StartY;
-        double normalizationFactor = sqrt(dy*dy + dx*dx); // Normalize the direction so we go the same speed at any distance
-        double speedFactor = 1.15; // Otherwise it will be too slow
-        double moveX = (dx/normalizationFactor) * speedFactor;
-        double moveY = (dy/normalizationFactor) * speedFactor;
-        MoveAndTurn(moveX, moveY);
-      }
-      else // keep turning
-      {
-        TurnTowardsDestination();
-      }
-    }
-    else // Not on Sline and need to follow it
+  // If we're facing the goal, move towards it
+  if(fabs(WorldAngle - ConvertDegToRad(EulerAngles[2])) < SLINE_TOLERANCE)
+  {
+    if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
     {
       TurnTowardsDestination();
-      Forward(TURN_RATE);
+      ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
+      Forward(MOVEMENT_SPEED);
     }
-  }
-  else if(smallest > SAFE_DISTANCE) // safe < smallest < follow, start following that wall
-  {
-    CurrentPhase = WALL;
+    else // facing goal with wall in nearby
+    {
+      if(smallest > SAFE_DISTANCE) // safe < smallest < follow, start following that wall
+      {
+        WallStartX = CurrentX; // Remember where the wall was
+        WallStartY = CurrentY;
+        CurrentPhase = WALL;
 
-    // Pick a side to put the wall and change the phase
-    if(side == CENTER)
-    {
-      if(Smoothed_Scan[LEFT] < Smoothed_Scan[RIGHT])
-      {
-        FollowWallSide = LEFT;
+        // Pick a side to put the wall and change the phase
+        if(side == CENTER)
+        {
+          if(Smoothed_Scan[LEFT] < Smoothed_Scan[RIGHT])
+          {
+            FollowWallSide = LEFT;
+          }
+          else
+          {
+            FollowWallSide = RIGHT;
+          }
+        }
+        else if(side == RIGHT)
+        {
+          FollowWallSide = RIGHT;
+        }
+        else
+        {
+          FollowWallSide = LEFT;
+        }
       }
-      else
+      else // too close to wall -- REVERSE THRUSTERS ACTIVATE
       {
-        FollowWallSide = RIGHT;
+        Forward(-1 * MOVEMENT_SPEED);
       }
-    }
-    else if(side == RIGHT)
-    {
-      FollowWallSide = RIGHT;
-    }
-    else
-    {
-      FollowWallSide = LEFT;
     }
   }
-  else // too close to wall -- REVERSE THRUSTERS ACTIVATE
+  else // Sline phase and not facing the goal
   {
-    Forward(-1 * MOVEMENT_SPEED);
+    TurnTowardsDestination();
   }
 }
 
@@ -417,7 +426,7 @@ void SlinePhase()
 // The robot will adjust itself based on its proximity to the wall it has decided to follow.
 void WallPhase()
 {
-  // If we're on the Sline within a certain margin of error and not where we last saw the wall,
+  // If we're on the Sline within a certain margin of error and closer to the sline than where we first saw the wall,
   // It's time to turn towards the goal and follow the Sline
   if(fabs(WallStartX - CurrentX) < SLINE_TOLERANCE * 10
     && fabs(WallStartY - CurrentY) < SLINE_TOLERANCE * 10
