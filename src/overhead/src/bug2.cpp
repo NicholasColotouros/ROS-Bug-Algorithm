@@ -20,6 +20,23 @@ enum CornerSubPhase { MOVE, TURN };
 enum Direction { LEFT, CENTER, RIGHT, NONE };
 
 ///////////////////////////////////
+//////////// CONSTANTS ////////////
+///////////////////////////////////
+const float MOVEMENT_SPEED = 0.05;
+const float TURN_RATE  = 0.15;
+
+const float FOLLOW_DISTANCE = 1;
+const float SAFE_DISTANCE = 0.8;
+
+const float CORNER_DROPOFF_DELTA = 0.75;  // Used to detect how far of a difference in readings consists of a corner
+const float TURN_WAIT_TIME_SECONDS = 0.5; // A few actions move and turn, this is the delay between the two
+
+const int MAX_SCAN_REP = 5;
+const float SLINE_TOLERANCE = 0.01;
+
+const double PI = 3.14159;
+
+///////////////////////////////////
 ///////// STATE VARIABLES /////////
 ///////////////////////////////////
 int CurrentPhase;         // What planning phase the robot is in
@@ -30,7 +47,7 @@ float Smoothed_Scan[3];   // Closest points of the Left, Right, Middle middle pa
 int CurrentScanRep;       // Current repetition of the scan
 int FollowWallSide;       // Tells use which side the wall we're following is on/should be
 float PreviousWallDist;   // Wall distance being followed from the last reading
-bool GPSInitialized;      // Flag used to determine if the start position has been set
+bool GPSInitialized;      // Flag used to determine if the start position has been initialized
 
 // Positioning variables. Doubles used instead of floats for accuracy
 double StartX;
@@ -43,7 +60,7 @@ double EndY;
 double WallStartX;  // Used to track where we last saw the wall when we started following
 double WallStartY;
 
-double WorldAngle;    // Angle of robot to goal with respect to world
+double WorldAngle;    // Angle of robot to goal with respect to world in rad
 double EulerAngles[3];
 ///////////////////////////////////
 ////////// ROS VARIABLES //////////
@@ -58,22 +75,6 @@ kobuki_msgs::MotorPower Msg_motor;
 geometry_msgs::Pose Msg_pose;
 gazebo_msgs::ModelStates Msg_model;
 
-///////////////////////////////////
-//////////// CONSTANTS ////////////
-///////////////////////////////////
-const float MOVEMENT_SPEED = 0.05;
-const float TURN_RATE  = 0.15;
-
-const float FOLLOW_DISTANCE = 1.5;
-const float SAFE_DISTANCE = 1;
-
-const int MAX_SCAN_REP = 5;
-const float CORNER_DROPOFF_DELTA = 0.75;  // Used to detect how far of a difference in readings consists of a corner
-const float TURN_WAIT_TIME_SECONDS = 0.5; // A few actions move and turn, this is the delay between the two
-const float SLINE_TOLERANCE = 0.01;
-const float GOAL_TOLERANCE = 0.1; // Aim to get this far from goal
-
-const double PI = 3.14159;
 ///////////////////////////////////
 /////// METHOD DECLARATIONS /////// These are the important methods
 ///////////////////////////////////
@@ -95,8 +96,8 @@ int main(int argc, char **argv)
   ros::NodeHandle n;
 
   // Get params
-  n.getParam("bugAlg/goal_x", EndX);
-  n.getParam("bugAlg/goal_y", EndY);
+  n.getParam("bug2/goal_x", EndX);
+  n.getParam("bug2/goal_y", EndY);
 
   // Turn on engine
 	Motors_publisher = n.advertise<kobuki_msgs::MotorPower>("/mobile_base/commands/motor_power", 1);
@@ -105,7 +106,7 @@ int main(int argc, char **argv)
   Motors_publisher.publish(Msg_motor);
 
   // GPS Subscriber
-  n.subscribe("/gazebo/model_states", 1, ProcessGPS);
+  ros::Subscriber gpsSub = n.subscribe("/gazebo/model_states", 1, ProcessGPS);
 
   // Robot state initialization
   CurrentPhase = SLINE;
@@ -117,6 +118,19 @@ int main(int argc, char **argv)
   ros::spin();
 }
 
+float ConvertDegToRad(float deg)
+{
+  return 2 * PI * (deg/360);
+}
+
+// returns the distance between the two points
+float dist(float x1, float y1, float x2, float y2)
+{
+  float dx = x1 - x2;
+  float dy = y1 - y2;
+  return(sqrt(dx*dx + dy*dy));
+}
+
 void Forward(float dist)
 {
   Cmd.linear.x = dist;
@@ -125,18 +139,6 @@ void Forward(float dist)
   Cmd.angular.x = 0;
   Cmd.angular.y = 0;
   Cmd.angular.z = 0;
-  Velocity_publisher.publish(Cmd);
-}
-
-void MoveAndTurn(float x, float y)
-{
-  Cmd.angular.x = 0;
-  Cmd.angular.y = 0;
-  Cmd.angular.z = 0;
-
-  Cmd.linear.x = x;
-  Cmd.linear.y = y;
-  Cmd.linear.z = 0;
   Velocity_publisher.publish(Cmd);
 }
 
@@ -166,16 +168,14 @@ void TurnAway(float rad)
 // Turn towards the destination
 void TurnTowardsDestination()
 {
-  double turnAngle = WorldAngle - EulerAngles[2];
-  double turnsToComplete = 5;
-
+  double turnAngle = WorldAngle - ConvertDegToRad(EulerAngles[2]);
   Cmd.linear.x = 0;
   Cmd.linear.y = 0;
   Cmd.linear.z = 0;
 
   Cmd.angular.x = 0;
   Cmd.angular.y = 0;
-  Cmd.angular.z = turnAngle/turnsToComplete;
+  Cmd.angular.z = turnAngle;
 
   Velocity_publisher.publish(Cmd);
 }
@@ -250,11 +250,6 @@ bool CheckIfOnSline()
   return false;
 }
 
-float ConvertDegToRad(float deg)
-{
-  return 2 * PI * (deg/360);
-}
-
 ///////////////////////////////////
 ///////// PLANNER METHODS /////////
 ///////////////////////////////////
@@ -262,14 +257,6 @@ float ConvertDegToRad(float deg)
 // Called by the geolocation subscribed topic. Updates the bots position and orientation
 void ProcessGPS(const gazebo_msgs::ModelStates& gpsScan)
 {
-  // Note the start position upon reception of the first message
-  if(!GPSInitialized)
-  {
-    StartX = gpsScan.pose[2].position.x;
-    StartY = gpsScan.pose[2].position.y;
-    GPSInitialized = true;
-  }
-
   CurrentX = gpsScan.pose[2].position.x;
   CurrentY = gpsScan.pose[2].position.y;
 
@@ -289,6 +276,15 @@ void ProcessGPS(const gazebo_msgs::ModelStates& gpsScan)
   EulerAngles[0] = (atan2(2.0 * (quaty * quatz + quatx * quatw),(-x2 - y2 + z2 + w2)) * (180.0/PI));
   EulerAngles[1] = (asin(-2.0 * (quatx * quatz - quaty * quatw)) * (180.0/PI));
   EulerAngles[2] = (atan2(2.0 * (quatx * quaty + quatz * quatw),(x2 - y2 - z2 + w2)) * (180.0/PI));
+
+  // Note the start position upon reception of the first message and turn towards the goal
+  if(!GPSInitialized)
+  {
+    StartX = CurrentX;
+    StartY = CurrentY;
+    TurnTowardsDestination();
+    GPSInitialized = true;
+  }
 }
 
 // Scan the number of times specified by maxScanRep before moving. This is to prevent magical NaN misreads.
@@ -328,14 +324,7 @@ void ProcessLaserScan(const sensor_msgs::LaserScan::ConstPtr& scan)
 
 void PlanPath()
 {
-  // If we're close enough to the goal, turn off
-  double distFromGoal = sqrt(pow(CurrentX - EndX, 2) + pow(CurrentX - EndX, 2));
-  if (distFromGoal < GOAL_TOLERANCE)
-  {
-    Msg_motor.state = 0;
-    Motors_publisher.publish(Msg_motor);
-  }
-
+  printf("Phase: %i\tOnLine: %i\n", CurrentPhase, CheckIfOnSline());
   switch(CurrentPhase)
   {
     case SLINE:
@@ -359,66 +348,67 @@ void PlanPath()
 // Then it will check for a wall in front.
 void SlinePhase()
 {
-  // If facing goal
-    // if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
-      // rotate towards goals
-      // delay
-      // move towards goal
-    // else // facing goal and wall in front
-      // remember location as lastWall, follow that wall
-  // else// not facing goal
-    // turn towards goal
   std::tr1::tuple<float, int> point = GetClosestPointAndDirection();
   float smallest = std::tr1::get<0>(point);
   int side = std::tr1::get<1>(point);
 
-  // If we're facing the goal, move towards it
-  if(fabs(WorldAngle - ConvertDegToRad(EulerAngles[2])) < SLINE_TOLERANCE)
+  if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
   {
-    if(smallest > FOLLOW_DISTANCE || smallest == 0) // safe and not following wall
+    TurnTowardsDestination();
+    ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
+
+    // If we're on the SLine
+    if (CheckIfOnSline())
+    {
+      // If we're on the sline and facing the goal, move forward
+      if (abs(WorldAngle - ConvertDegToRad(EulerAngles[2]))<0.01)
+      {
+        Forward(MOVEMENT_SPEED);
+      }
+
+      else // Not facing the goal but on the sline -> turn towards it
+      {
+        TurnTowardsDestination();
+      }
+    }
+    else // hail mary in the odd case we're not on the sline but should be
     {
       TurnTowardsDestination();
       ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
       Forward(MOVEMENT_SPEED);
     }
-    else // facing goal with wall in nearby
-    {
-      if(smallest > SAFE_DISTANCE) // safe < smallest < follow, start following that wall
-      {
-        WallStartX = CurrentX; // Remember where the wall was
-        WallStartY = CurrentY;
-        CurrentPhase = WALL;
+  }
+  else if(smallest > SAFE_DISTANCE) // safe < smallest < follow, start following that wall
+  {
+    CurrentPhase = WALL;
+    WallStartX = CurrentX; // remember where we started following the wall so we know only to leave it when getting closer
+    WallStartY = CurrentY;
 
-        // Pick a side to put the wall and change the phase
-        if(side == CENTER)
-        {
-          if(Smoothed_Scan[LEFT] < Smoothed_Scan[RIGHT])
-          {
-            FollowWallSide = LEFT;
-          }
-          else
-          {
-            FollowWallSide = RIGHT;
-          }
-        }
-        else if(side == RIGHT)
-        {
-          FollowWallSide = RIGHT;
-        }
-        else
-        {
-          FollowWallSide = LEFT;
-        }
-      }
-      else // too close to wall -- REVERSE THRUSTERS ACTIVATE
+    // Pick a side to put the wall and change the phase
+    if(side == CENTER)
+    {
+      if(Smoothed_Scan[LEFT] < Smoothed_Scan[RIGHT])
       {
-        Forward(-1 * MOVEMENT_SPEED);
+        FollowWallSide = LEFT;
+      }
+      else
+      {
+        FollowWallSide = RIGHT;
       }
     }
+    else if(side == RIGHT)
+    {
+      FollowWallSide = RIGHT;
+    }
+    else
+    {
+      FollowWallSide = LEFT;
+    }
+    PreviousWallDist = Smoothed_Scan[FollowWallSide];
   }
-  else // Sline phase and not facing the goal
+  else // too close to wall -- REVERSE THRUSTERS ACTIVATE
   {
-    TurnTowardsDestination();
+    Forward(-1 * MOVEMENT_SPEED);
   }
 }
 
@@ -428,13 +418,18 @@ void WallPhase()
 {
   // If we're on the Sline within a certain margin of error and closer to the sline than where we first saw the wall,
   // It's time to turn towards the goal and follow the Sline
-  if(fabs(WallStartX - CurrentX) < SLINE_TOLERANCE * 10
-    && fabs(WallStartY - CurrentY) < SLINE_TOLERANCE * 10
-    && CheckIfOnSline())
+  if(fabs(WallStartX - CurrentX) > SLINE_TOLERANCE * 5 // Check to make sure we're not too close to where we started following the wall
+    && fabs(WallStartY - CurrentY) > SLINE_TOLERANCE * 5
+    && CheckIfOnSline()
+    && fabs(CurrentX - StartX) > SLINE_TOLERANCE * 5 // Check to make sure we're not at the start
+    && fabs(CurrentY - StartY) > SLINE_TOLERANCE * 5
+    && dist(CurrentX, CurrentY, EndX, EndY) < dist(WallStartX, WallStartY, EndX, EndY) // We're clooser to the goal than the last time we were on the sline
+  )
   {
     CurrentPhase = SLINE;
+    TurnTowardsDestination();
   }
-  // Turn away if there is a wall in front
+  // Turn away if there is a wall in front and the above check failed. it means we're not on the sline and we need to follow the wall
   else if(Smoothed_Scan[CENTER] < SAFE_DISTANCE)
   {
     TurnAway(TURN_RATE * 2);
@@ -471,7 +466,7 @@ void CornerPhase()
 {
   if(CurrentCornerPhase == MOVE) // Try to get a good ways into the doorway or distance
   {
-    float boost_into_doorway_speed = 1.10;
+    float boost_into_doorway_speed = 1.0;
     TurnAway(TURN_RATE * 2);
     ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
     Forward(boost_into_doorway_speed); // Get a good ways into the doorway
