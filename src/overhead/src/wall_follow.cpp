@@ -8,6 +8,19 @@
 #include <kobuki_msgs/MotorPower.h>
 
 ///////////////////////////////////
+//////////// CONSTANTS ////////////
+///////////////////////////////////
+const float MOVEMENT_SPEED = 0.05;
+const float TURN_RATE  = 0.15;
+
+const float FOLLOW_DISTANCE = 1;
+const float SAFE_DISTANCE = 0.8;
+
+const int MAX_SCAN_REP = 5;
+const float CORNER_DROPOFF_DELTA = 0.75;  // Used to detect how far of a difference in readings consists of a corner
+const float TURN_WAIT_TIME_SECONDS = 0.5; // A few actions move and turn, this is the delay between the two
+
+///////////////////////////////////
 ////////////// ENUMS //////////////
 ///////////////////////////////////
 
@@ -36,18 +49,6 @@ ros::Publisher Velocity_publisher;
 geometry_msgs::Twist Cmd;
 kobuki_msgs::MotorPower Msg_motor;
 
-///////////////////////////////////
-//////////// CONSTANTS ////////////
-///////////////////////////////////
-const float MOVEMENT_SPEED = 0.05;
-const float TURN_RATE  = 0.15;
-
-const float FOLLOW_DISTANCE = 1.5;
-const float SAFE_DISTANCE = 1;
-
-const int MAX_SCAN_REP = 5;
-const float CORNER_DROPOFF_DELTA = 0.75;  // Used to detect how far of a difference in readings consists of a corner
-const float TURN_WAIT_TIME_SECONDS = 0.5; // A few actions move and turn, this is the delay between the two
 
 ///////////////////////////////////
 /////// METHOD DECLARATIONS /////// These are the important methods
@@ -316,7 +317,7 @@ void CornerPhase()
 {
   if(CurrentCornerPhase == MOVE) // Try to get a good ways into the doorway or distance
   {
-    float boost_into_doorway_speed = 1.10;
+    float boost_into_doorway_speed = 1.0;
     TurnAway(TURN_RATE * 2);
     ros::Duration(TURN_WAIT_TIME_SECONDS).sleep();
     Forward(boost_into_doorway_speed); // Get a good ways into the doorway
